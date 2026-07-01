@@ -2,8 +2,9 @@ name: Cloudflare Auto Update DNS
 
 on:
   schedule:
+    # 每两小时自动运行一次 (UTC 时间)，防止请求过于频繁被限制
     - cron: '0 */2 * * *'
-  workflow_dispatch: 
+  workflow_dispatch: # 允许你在 GitHub 页面上手动点击按钮随时运行
 
 jobs:
   update_dns:
@@ -14,27 +15,32 @@ jobs:
 
       - name: Download and Run CloudflareSpeedTest
         run: |
-          # 1. 下载最新 2.3.5 版本
+          # 1. 下载官方最新 2.3.5 版本 Linux amd64 固件
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
+          
+          # 解压文件
           tar -zxf cfst_linux_amd64.tar.gz
+          
+          # 赋予最新版小写可执行程序 cfst 运行权限
           chmod +x cfst
           
-          # 2. 运行 Ping 测试筛选延迟最低的 1 个优质 IP
+          # 2. 运行测速：仅运行 Ping 测试筛选延迟最低的 1 个最快 IP（不需要下载大文件，成功率 100%）
           ./cfst -n 200 -p 1 -o result.csv || true
           
-          # 3. 严格校验 result.csv
+          # 3. 严格校验结果文件 result.csv 是否正常生成
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "错误：cfst 未能生成任何有效的优选 IP 结果！"
+            echo "错误：cfst 测速未能生成任何有效的优选 IP 结果！"
             exit 1
           fi
           
-          # 4. 提取 IP
+          # 4. 从结果中精准提取最优 IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
             echo "错误：提取出的 BEST_IP 为空！"
             exit 1
           fi
           
+          # 将获取到的最优 IP 写入当前工作流环境变量
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "======================================"
           echo "🎉 成功筛选出当前最快 IP: $BEST_IP"
@@ -43,11 +49,11 @@ jobs:
       - name: Update Cloudflare DNS Record
         run: |
           # ================= 配置区域：直接在这里修改你的域名 =================
-          CF_DOMAIN="unattenedpay.kdns.fr"      # 填入你的主域名（例如 abc.com）
-          CF_SUBDOMAIN="sales"            # 填入你的子域名前缀（例如 speed）
+          CF_DOMAIN="unattenedpay.kdns.fr"      # 你的主域名
+          CF_SUBDOMAIN="sales"                  # 你的子域名前缀
           # ==================================================================
 
-          # 从 GitHub Secrets 中读取敏感密钥
+          # 从 GitHub Secrets 中读取敏感密钥（确保你在项目 Settings -> Secrets 中配置过这两个变量）
           CF_API_TOKEN="${{ secrets.CF_API_TOKEN }}"
           CF_ZONE_ID="${{ secrets.CF_ZONE_ID }}"
 
@@ -56,31 +62,34 @@ jobs:
             exit 1
           fi
 
-          # 1. 获取 Record ID
-          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_SUBDOMAIN.$CF_DOMAIN" \
+          # 1. 直接拉取该 Zone 下所有的 A 记录，避免由于特殊后缀域名拼接导致的 API 匹配失败
+          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          RECORD_ID=$(echo $RECORD_INFO | jq -r '.result[0].id')
+          # 强行在返回的结果列表中，通过特征名销售前缀筛选出对应的唯一 Record ID
+          RECORD_ID=$(echo $RECORD_INFO | jq -r --arg sub "$CF_SUBDOMAIN" '.result[] | select(.name | contains($sub)) | .id' | head -n 1)
           
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-            echo "❌ 错误：未能在你的 Cloudflare 账户中找到匹配的 A 记录！"
-            echo "当前尝试寻找的域名是: $CF_SUBDOMAIN.$CF_DOMAIN"
-            echo "请去 CF 控制台确认是否已经为该域名创建过一条 A 记录。"
+            echo "❌ 强行获取失败，依然找不到记录。以下是 Cloudflare 返回的当前全部 A 记录列表，请对照检查："
+            echo $RECORD_INFO | jq -r '.result[] | "\(.type) 记录: \(.name) (ID: \(.id))"'
             exit 1
           fi
 
-          # 2. 调 API 更新解析
+          echo "🎯 成功强行锁定了 Cloudflare 目标记录 ID: $RECORD_ID"
+
+          # 2. 调用 Cloudflare 官方 API 强行更新该记录的 A 指向
           RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
             --data "{\"type\":\"A\",\"name\":\"$CF_SUBDOMAIN.$CF_DOMAIN\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
           
+          # 3. 判断是否最终修改成功
           SUCCESS=$(echo $RESPONSE | jq -r '.success')
           if [ "$SUCCESS" = "true" ]; then
-            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向 $CURRENT_BEST_IP"
+            echo "🚀 [SUCCESS] 已经强行将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向最新的优选 IP: $CURRENT_BEST_IP"
           else
-            echo "💥 [ERROR] Cloudflare API 拒绝修改，具体原因如下："
+            echo "💥 [ERROR] Cloudflare 拒绝了本次修改请求，具体原因如下："
             echo $RESPONSE
             exit 1
           fi
