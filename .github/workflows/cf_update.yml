@@ -2,8 +2,8 @@ name: Cloudflare Auto Update DNS
 
 on:
   schedule:
-    # 每一小时自动运行一次 (UTC 时间，可根据需求修改)
-    - cron: '0 * * * *'
+    # 每两小时自动运行一次 (可以有效防止请求过于频繁被 CF 限制)
+    - cron: '0 */2 * * *'
   workflow_dispatch: # 允许你随时手动点击按钮运行
 
 jobs:
@@ -19,8 +19,15 @@ jobs:
           wget -qO- https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url.*linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4 | wget -qi -
           tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
           
-          # 运行测速，筛选出 1 个下载速度最快、延迟最低的优质 IP
-          ./CloudflareST -n 200 -url https://cf.s3.xyz/100m -p 1 -o result.csv
+          # 运行测速。这里换成了更稳定的官方测速地址或公共大厂测速文件 (-url)
+          # 如果测速文件暂时失效，它会自动降低要求挑选延迟最低的 IP
+          ./CloudflareST -n 200 -url https://download.visualstudio.microsoft.com/download/pr/q -p 1 -o result.csv || true
+          
+          # 检查是否成功生成了结果文件
+          if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
+            echo "测速下载失败，启动备用方案：仅按延迟（Ping）高低筛选优质 IP"
+            ./CloudflareST -n 200 -p 1 -o result.csv
+          fi
           
           # 提取测速结果中的第一个（最优）IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1)
@@ -35,7 +42,8 @@ jobs:
             -H "Content-Type: application/json" | jq -r '.result[0].id')
           
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-            echo "错误：未能在 Cloudflare 找到对应的 DNS 解析记录，请先去控制台手动添加一条 A 记录！"
+            echo "错误：未能在 Cloudflare 找到对应的 DNS 解析记录！"
+            echo "请检查你的 CF_SUBDOMAIN 和 CF_DOMAIN 变量是否正确，并且去 CF 后台确保已经手动创建了这条 A 记录！"
             exit 1
           fi
 
