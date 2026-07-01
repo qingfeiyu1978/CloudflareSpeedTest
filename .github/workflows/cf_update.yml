@@ -14,11 +14,11 @@ jobs:
 
       - name: Download and Run CloudflareSpeedTest
         run: |
-          # 1. 直接使用固定格式下载官方最新稳定版 Linux amd64 安装包（避免 grep 抓取失败）
+          # 1. 使用你提供的最新 2.3.5 正确下载链接
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           
-          # 解压并赋予执行权限
-          tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
+          # 解压对应的新文件名
+          tar -zxf cfst_linux_amd64.tar.gz
           chmod +x CloudflareST
           
           # 2. 仅运行 Ping 测试，筛选延迟最低的 1 个优质 IP（成功率 100%）
