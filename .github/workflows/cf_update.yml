@@ -14,12 +14,14 @@ jobs:
 
       - name: Download and Run CloudflareSpeedTest
         run: |
-          # 1. 下载最新版工具
-          wget -qO- https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url.*linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4 | wget -qi -
+          # 1. 直接使用固定格式下载官方最新稳定版 Linux amd64 安装包（避免 grep 抓取失败）
+          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareSpeedTest_linux_amd64.tar.gz
+          
+          # 解压并赋予执行权限
           tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
           chmod +x CloudflareST
           
-          # 2. 仅运行 Ping 测试（不需要下载测速文件，成功率 100%），筛选延迟最低的 1 个优质 IP
+          # 2. 仅运行 Ping 测试，筛选延迟最低的 1 个优质 IP（成功率 100%）
           ./CloudflareST -n 200 -p 1 -o result.csv || true
           
           # 3. 严格校验 result.csv
@@ -43,13 +45,11 @@ jobs:
 
       - name: Update Cloudflare DNS Record
         run: |
-          # 1. 检查环境变量是否存在
           if [ -z "${{ secrets.CF_API_TOKEN }}" ] || [ -z "${{ secrets.CF_ZONE_ID }}" ]; then
             echo "错误：GitHub Secrets 中的 CF_API_TOKEN 或 CF_ZONE_ID 未配置！"
             exit 1
           fi
 
-          # 2. 获取 Record ID
           RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records?type=A&name=${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "Content-Type: application/json")
@@ -59,11 +59,9 @@ jobs:
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
             echo "❌ 错误：未能在你的 Cloudflare 账户中找到匹配的 A 记录！"
             echo "当前尝试寻找的域名是: ${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}"
-            echo "请确保：1. 你已经在 CF 后台手动创建了这条 A 记录；2. Secrets 里的域名大小写/拼写完全一致。"
             exit 1
           fi
 
-          # 3. 调 API 更新解析
           RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "Content-Type: application/json" \
