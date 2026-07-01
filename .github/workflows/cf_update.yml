@@ -14,19 +14,21 @@ jobs:
 
       - name: Download and Run CloudflareSpeedTest
         run: |
-          # 1. 使用你提供的最新 2.3.5 正确下载链接
+          # 1. 下载最新 2.3.5 版本
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           
-          # 解压对应的新文件名
+          # 解压
           tar -zxf cfst_linux_amd64.tar.gz
-          chmod +x CloudflareST
           
-          # 2. 仅运行 Ping 测试，筛选延迟最低的 1 个优质 IP（成功率 100%）
-          ./CloudflareST -n 200 -p 1 -o result.csv || true
+          # 新版本解压出来的程序名是小写的 cfst，赋予其执行权限
+          chmod +x cfst
+          
+          # 2. 运行 Ping 测试筛选延迟最低的 1 个优质 IP
+          ./cfst -n 200 -p 1 -o result.csv || true
           
           # 3. 严格校验 result.csv
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "错误：CloudflareST 未能生成任何有效的优选 IP 结果！"
+            echo "错误：cfst 未能生成任何有效的优选 IP 结果！"
             exit 1
           fi
           
