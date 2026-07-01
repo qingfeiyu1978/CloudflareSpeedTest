@@ -16,11 +16,7 @@ jobs:
         run: |
           # 1. 下载最新 2.3.5 版本
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
-          
-          # 解压
           tar -zxf cfst_linux_amd64.tar.gz
-          
-          # 新版本解压出来的程序名是小写的 cfst，赋予其执行权限
           chmod +x cfst
           
           # 2. 运行 Ping 测试筛选延迟最低的 1 个优质 IP
@@ -34,7 +30,6 @@ jobs:
           
           # 4. 提取 IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
-          
           if [ -z "$BEST_IP" ]; then
             echo "错误：提取出的 BEST_IP 为空！"
             exit 1
@@ -47,31 +42,43 @@ jobs:
 
       - name: Update Cloudflare DNS Record
         run: |
-          if [ -z "${{ secrets.CF_API_TOKEN }}" ] || [ -z "${{ secrets.CF_ZONE_ID }}" ]; then
+          # ================= 配置区域：直接在这里修改你的域名 =================
+          CF_DOMAIN="unattenedpay.kdns.fr"      # 填入你的主域名（例如 abc.com）
+          CF_SUBDOMAIN="sales"            # 填入你的子域名前缀（例如 speed）
+          # ==================================================================
+
+          # 从 GitHub Secrets 中读取敏感密钥
+          CF_API_TOKEN="${{ secrets.CF_API_TOKEN }}"
+          CF_ZONE_ID="${{ secrets.CF_ZONE_ID }}"
+
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
             echo "错误：GitHub Secrets 中的 CF_API_TOKEN 或 CF_ZONE_ID 未配置！"
             exit 1
           fi
 
-          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records?type=A&name=${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+          # 1. 获取 Record ID
+          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_SUBDOMAIN.$CF_DOMAIN" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
           RECORD_ID=$(echo $RECORD_INFO | jq -r '.result[0].id')
           
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
             echo "❌ 错误：未能在你的 Cloudflare 账户中找到匹配的 A 记录！"
-            echo "当前尝试寻找的域名是: ${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}"
+            echo "当前尝试寻找的域名是: $CF_SUBDOMAIN.$CF_DOMAIN"
+            echo "请去 CF 控制台确认是否已经为该域名创建过一条 A 记录。"
             exit 1
           fi
 
-          RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/$RECORD_ID" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+          # 2. 调 API 更新解析
+          RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
+            --data "{\"type\":\"A\",\"name\":\"$CF_SUBDOMAIN.$CF_DOMAIN\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
           
           SUCCESS=$(echo $RESPONSE | jq -r '.success')
           if [ "$SUCCESS" = "true" ]; then
-            echo "🚀 [SUCCESS] 已经将 ${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }} 完美指向 $CURRENT_BEST_IP"
+            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向 $CURRENT_BEST_IP"
           else
             echo "💥 [ERROR] Cloudflare API 拒绝修改，具体原因如下："
             echo $RESPONSE
