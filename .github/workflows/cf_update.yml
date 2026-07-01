@@ -15,7 +15,7 @@ jobs:
       - name: Download and Run CloudflareSpeedTest
         run: |
           # 1. 直接使用固定格式下载官方最新稳定版 Linux amd64 安装包（避免 grep 抓取失败）
-          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareSpeedTest_linux_amd64.tar.gz
+          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           
           # 解压并赋予执行权限
           tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
