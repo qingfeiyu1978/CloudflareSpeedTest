@@ -1,0 +1,54 @@
+name: Cloudflare Auto Update DNS
+
+on:
+  schedule:
+    # 每一小时自动运行一次 (UTC 时间，可根据需求修改)
+    - cron: '0 * * * *'
+  workflow_dispatch: # 允许你随时手动点击按钮运行
+
+jobs:
+  update_dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download and Run CloudflareSpeedTest
+        run: |
+          # 自动下载最新版的测速工具
+          wget -qO- https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url.*linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4 | wget -qi -
+          tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
+          
+          # 运行测速，筛选出 1 个下载速度最快、延迟最低的优质 IP
+          ./CloudflareST -n 200 -url https://cf.s3.xyz/100m -p 1 -o result.csv
+          
+          # 提取测速结果中的第一个（最优）IP
+          BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1)
+          echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
+          echo "本次测速筛选出的最快 IP 为: $BEST_IP"
+
+      - name: Update Cloudflare DNS Record
+        run: |
+          # 1. 获取你要更新的 DNS 记录的 Record ID
+          RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records?type=A&name=${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" | jq -r '.result[0].id')
+          
+          if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
+            echo "错误：未能在 Cloudflare 找到对应的 DNS 解析记录，请先去控制台手动添加一条 A 记录！"
+            exit 1
+          fi
+
+          # 2. 调用 API 更新该记录的 IP
+          RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/$RECORD_ID" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"A\",\"name\":\"${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }}\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
+          
+          SUCCESS=$(echo $RESPONSE | jq -r '.success')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "🎉 成功！已经将 ${{ secrets.CF_SUBDOMAIN }}.${{ secrets.CF_DOMAIN }} 成功绑定到最新的优选 IP: $CURRENT_BEST_IP"
+          else
+            echo "❌ 失败！Cloudflare API 返回错误原因: $RESPONSE"
+            exit 1
+          fi
