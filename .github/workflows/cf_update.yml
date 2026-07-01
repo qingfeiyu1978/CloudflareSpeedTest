@@ -2,7 +2,7 @@ name: Cloudflare Auto Update DNS
 
 on:
   schedule:
-    # 每两小时自动运行一次 (UTC 时间)
+    # 保持每两小时自动运行一次
     - cron: '0 */2 * * *'
   workflow_dispatch: # 允许手动点击按钮随时运行
 
@@ -17,34 +17,40 @@ jobs:
         run: |
           # 1. 下载官方最新 2.3.5 版本 Linux amd64 固件
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
-          
-          # 解压文件
           tar -zxf cfst_linux_amd64.tar.gz
-          
-          # 赋予最新版小写可执行程序 cfst 运行权限
           chmod +x cfst
           
-          # 2. 运行测速：强制指定 -f ip.txt 参数！
-          # 这会让 GitHub 专门在针对中国大陆三网优化的 IP 库里进行筛选，彻底解决 -1 报错
-          ./cfst -f ip.txt -n 100 -p 1 -o result.csv || true
+          # 2. 严格限定美国西海岸（洛杉矶、圣何塞等）对大陆三网最友好的核心 IP 段
+          cat <<EOF > na_west_ips.txt
+          104.16.0.0/13
+          104.24.0.0/14
+          172.67.0.0/16
+          162.159.0.0/16
+          198.41.128.0/17
+          108.162.192.0/18
+          EOF
           
-          # 3. 严格校验结果文件 result.csv 是否正常生成
+          # 3. 运行测速：
+          # -f na_west_ips.txt 锁定美西优质段
+          # -url 引入官方推荐的大陆优化测速节点，强行让海外服务器模拟大陆方向的连接速率，过滤死 IP
+          ./cfst -f na_west_ips.txt -url https://cf.xiu2.xyz/url -n 100 -p 1 -o result.csv || true
+          
+          # 4. 严格校验结果文件 result.csv 是否正常生成
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "错误：cfst 测速未能生成任何有效的优选 IP 结果！"
+            echo "错误：cfst 测速未能生成任何有效的北美优选 IP 结果！"
             exit 1
           fi
           
-          # 4. 从结果中精准提取最优 IP
+          # 5. 从结果中精准提取最优美西 IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
             echo "错误：提取出的 BEST_IP 为空！"
             exit 1
           fi
           
-          # 将获取到的最优 IP 写入当前工作流环境变量
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "======================================"
-          echo "🎉 成功筛选出中国大陆优化最快 IP: $BEST_IP"
+          echo "🎉 成功筛选出大陆访问最快北美美西 IP: $BEST_IP"
           echo "======================================"
 
       - name: Update Cloudflare DNS Record
@@ -54,7 +60,6 @@ jobs:
           CF_SUBDOMAIN="sales"                  # 你的子域名前缀
           # ============================================
 
-          # 去除潜在的换行或前后空格混入
           CF_API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           CF_ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
 
@@ -94,7 +99,7 @@ jobs:
           # 5. 判断是否最终修改成功
           SUCCESS=$(echo "$RESPONSE" | jq -r '.success? // false')
           if [ "$SUCCESS" = "true" ]; then
-            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向大陆优选 IP: $CURRENT_BEST_IP"
+            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向大陆最快北美 IP: $CURRENT_BEST_IP"
           else
             echo "💥 [ERROR] Cloudflare 拒绝了本次修改请求。"
             exit 1
