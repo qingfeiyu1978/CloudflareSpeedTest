@@ -2,9 +2,9 @@ name: Cloudflare Auto Update DNS
 
 on:
   schedule:
-    # 保持每两小时自动运行一次
+    # UTC 0 */2 * * * 北京时间+8小时，如需国内整点运行可自行修改cron
     - cron: '0 */2 * * *'
-  workflow_dispatch: # 允许手动点击按钮随时运行
+  workflow_dispatch: # 支持手动触发运行
 
 jobs:
   update_dns:
@@ -13,94 +13,119 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download and Run CloudflareSpeedTest
+      - name: Download and Run CloudflareSpeedTest (Only US IP)
         run: |
-          # 1. 下载官方最新 2.3.5 版本 Linux amd64 固件
-          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
+          # 1. 带超时重试下载固定版本CFST
+          wget --timeout=10 --tries=3 -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
           chmod +x cfst
           
-          # 2. 严格限定美国西海岸（洛杉矶、圣何塞等）对大陆三网最友好的核心 IP 段
-          cat <<EOF > na_west_ips.txt
+          # 2. 纯北美美国CF网段，剔除欧洲重叠段
+          cat <<EOF > na_us_ips.txt
           104.16.0.0/13
           104.24.0.0/14
           172.67.0.0/16
           162.159.0.0/16
-          198.41.128.0/17
           108.162.192.0/18
+          198.41.128.0/17
+          104.18.0.0/14
           EOF
           
-          # 3. 运行测速：
-          # -f na_west_ips.txt 锁定美西优质段
-          # -url 引入官方推荐的大陆优化测速节点，强行让海外服务器模拟大陆方向的连接速率，过滤死 IP
-          ./cfst -f na_west_ips.txt -url https://cf.xiu2.xyz/url -n 100 -p 1 -o result.csv || true
+          # 3. 测速核心：-loc US 强制只保留美国节点
+          ./cfst -f na_us_ips.txt -loc US -url https://cf.xiu2.xyz/url -n 50 -p 1 -o result.csv || true
           
-          # 4. 严格校验结果文件 result.csv 是否正常生成
+          # 4. 二次过滤CSV，仅保留国家列=US的IP（双重兜底杜绝欧洲IP）
+          awk -F ',' '$7=="US"' result.csv > us_only.csv
+          mv us_only.csv result.csv
+          
+          # 5. 校验是否存在有效美国IP数据
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "错误：cfst 测速未能生成任何有效的北美优选 IP 结果！"
-            exit 1
+            echo "警告：本次测速未筛选到任何可用美国IP，跳过DNS更新，流程正常结束"
+            exit 0
           fi
           
-          # 5. 从结果中精准提取最优美西 IP
+          # 6. 提取测速第一行最优IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
-            echo "错误：提取出的 BEST_IP 为空！"
+            echo "错误：提取最优IP为空，终止流程"
             exit 1
           fi
+          
+          # ===== 新增：将最优IP写入本地文件 best_ip.txt =====
+          echo "$BEST_IP" > best_ip.txt
+          echo "已将最优北美IP写入 best_ip.txt"
           
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "======================================"
-          echo "🎉 成功筛选出大陆访问最快北美美西 IP: $BEST_IP"
+          echo "🎉 筛选出大陆访问最优美国IP: $BEST_IP"
           echo "======================================"
 
-      - name: Update Cloudflare DNS Record
-        run: |
-          # ================= 配置区域 =================
-          CF_DOMAIN="unattenedpay.kdns.fr"      # 你的主域名
-          CF_SUBDOMAIN="sales"                  # 你的子域名前缀
-          # ============================================
+      - name: Upload all log files (result.csv + best_ip.txt)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfst-us-ip-full-logs
+          path: |
+            result.csv
+            best_ip.txt
 
+      - name: Update Cloudflare DNS Record (Exact domain match)
+        run: |
+          # ================= 自定义配置区域 =================
+          CF_DOMAIN="unattenedpay.kdns.fr"
+          CF_SUBDOMAIN="sales"
+          # ==================================================
+          FULL_RECORD_NAME="${CF_SUBDOMAIN}.${CF_DOMAIN}"
+
+          # 读取密钥并清理空格
           CF_API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           CF_ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
 
           if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
-            echo "错误：GitHub Secrets 中的 CF_API_TOKEN 或 CF_ZONE_ID 未配置！"
+            echo "错误：Secrets 未配置 CF_API_TOKEN / CF_ZONE_ID"
             exit 1
           fi
 
-          # 1. 直接拉取该 Zone 下所有的 A 记录
+          # 获取Zone下所有A记录
           RESPONSE_RAW=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          # 2. 核心自检
           IS_SUCCESS=$(echo "$RESPONSE_RAW" | jq -r '.success? // false')
           if [ "$IS_SUCCESS" != "true" ]; then
-            echo "❌ Cloudflare API 鉴权失败，请检查 Secrets 配置。"
+            echo "❌ Cloudflare API 鉴权失败，请检查API令牌权限"
             exit 1
           fi
           
-          # 3. 通过特征名筛选 Record ID
-          RECORD_ID=$(echo "$RESPONSE_RAW" | jq -r --arg sub "$CF_SUBDOMAIN" '.result[]? | select(.name | contains($sub)) | .id' | head -n 1)
+          # 精准完全匹配域名，不再模糊contains，防止误匹配其他子域名
+          RECORD_ID=$(echo "$RESPONSE_RAW" | jq -r --arg dom "$FULL_RECORD_NAME" '.result[]? | select(.name == $dom) | .id')
+          CURRENT_DNS_IP=$(echo "$RESPONSE_RAW" | jq -r --arg dom "$FULL_RECORD_NAME" '.result[]? | select(.name == $dom) | .content')
           
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-            echo "❌ 错误：在你的域名下找不到包含 $CF_SUBDOMAIN 的 A 记录！"
+            echo "❌ 未找到域名记录：$FULL_RECORD_NAME"
             exit 1
           fi
 
-          echo "🎯 成功强行锁定了 Cloudflare 目标记录 ID: $RECORD_ID"
+          echo "当前DNS绑定IP: $CURRENT_DNS_IP"
+          echo "测速最优US IP: $CURRENT_BEST_IP"
 
-          # 4. 调用 Cloudflare 官方 API 强行更新该记录的 A 指向
+          # IP无变化则跳过更新，节约API请求
+          if [ "$CURRENT_DNS_IP" = "$CURRENT_BEST_IP" ]; then
+            echo "✅ IP无变更，无需更新DNS，流程结束"
+            exit 0
+          fi
+
+          echo "🎯 待更新记录ID: $RECORD_ID"
+
+          # 调用API更新A记录，关闭代理直连
           RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"$CF_SUBDOMAIN.$CF_DOMAIN\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
+            --data "{\"type\":\"A\",\"name\":\"$FULL_RECORD_NAME\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
           
-          # 5. 判断是否最终修改成功
           SUCCESS=$(echo "$RESPONSE" | jq -r '.success? // false')
           if [ "$SUCCESS" = "true" ]; then
-            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向大陆最快北美 IP: $CURRENT_BEST_IP"
+            echo "🚀 成功更新 $FULL_RECORD_NAME 指向北美IP: $CURRENT_BEST_IP"
           else
-            echo "💥 [ERROR] Cloudflare 拒绝了本次修改请求。"
+            echo "💥 DNS更新失败，API返回信息：$RESPONSE"
             exit 1
           fi
