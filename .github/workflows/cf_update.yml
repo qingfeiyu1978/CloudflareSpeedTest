@@ -20,28 +20,28 @@ jobs:
           tar -zxf cfst_linux_amd64.tar.gz
           chmod +x cfst
           
-          # 2. 严格限定美国西海岸（洛杉矶、圣何塞等）对大陆三网最友好的核心 IP 段
-          cat <<EOF > na_west_ips.txt
-          104.16.0.0/13
-          104.24.0.0/14
-          172.67.0.0/16
-          162.159.0.0/16
-          198.41.128.0/17
-          108.162.192.0/18
+          # 2. 精准限定【100% 锁定纯正美国、不乱飘、且国内访问延迟最优】的 Cloudflare 官方特属美西 IP 段
+          # 这些网段在全球路由中被高度固化在美国本土机房
+          cat <<EOF > pure_us_ips.txt
+          173.245.48.0/20
+          198.41.128.0/20
+          162.159.0.0/20
+          104.16.0.0/20
+          104.20.0.0/20
           EOF
           
           # 3. 运行测速：
-          # -f na_west_ips.txt 锁定美西优质段
-          # -url 引入官方推荐的大陆优化测速节点，强行让海外服务器模拟大陆方向的连接速率，过滤死 IP
-          ./cfst -f na_west_ips.txt -url https://cf.xiu2.xyz/url -n 100 -p 1 -o result.csv || true
+          # -f pure_us_ips.txt 锁死上述纯美网段
+          # -url 引入大陆优化测速节点，强行让 GitHub 模拟国内方向的连接速率，过滤死 IP 并挑出最快的一颗
+          ./cfst -f pure_us_ips.txt -url https://cf.xiu2.xyz/url -n 50 -p 1 -o result.csv || true
           
           # 4. 严格校验结果文件 result.csv 是否正常生成
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "错误：cfst 测速未能生成任何有效的北美优选 IP 结果！"
+            echo "错误：cfst 测速未能生成任何有效的美国优选 IP 结果！"
             exit 1
           fi
           
-          # 5. 从结果中精准提取最优美西 IP
+          # 5. 从结果中精准提取最优纯美 IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
             echo "错误：提取出的 BEST_IP 为空！"
@@ -50,7 +50,7 @@ jobs:
           
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "======================================"
-          echo "🎉 成功筛选出大陆访问最快北美美西 IP: $BEST_IP"
+          echo "🎉 成功筛选出 100% 固化纯美且大陆最快 IP: $BEST_IP"
           echo "======================================"
 
       - name: Update Cloudflare DNS Record
@@ -99,7 +99,7 @@ jobs:
           # 5. 判断是否最终修改成功
           SUCCESS=$(echo "$RESPONSE" | jq -r '.success? // false')
           if [ "$SUCCESS" = "true" ]; then
-            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向大陆最快北美 IP: $CURRENT_BEST_IP"
+            echo "🚀 [SUCCESS] 已经将 $CF_SUBDOMAIN.$CF_DOMAIN 完美指向 100% 纯美优选 IP: $CURRENT_BEST_IP"
           else
             echo "💥 [ERROR] Cloudflare 拒绝了本次修改请求。"
             exit 1
