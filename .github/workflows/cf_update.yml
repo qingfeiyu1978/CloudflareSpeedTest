@@ -32,51 +32,55 @@ jobs:
           EOF
           
           # 3. 测速核心：-loc US 强制只保留美国节点
-          ./cfst -f na_us_ips.txt -loc US -url https://cf.xiu2.xyz/url -n 50 -p 1 -o result.csv || true
+          ./cfst -f na_us_ips.txt -loc US -url https://cf.xiu2.xyz/url -n 20 -p 1 -o result.csv || true
           
-          # ========== 修复：先判断文件是否存在，不存在直接跳过 ==========
+          # 判断测速文件是否生成
           if [ ! -f result.csv ]; then
-            echo "警告：cfst 未生成 result.csv，无测速数据，流程结束"
+            echo "警告：cfst 未生成 result.csv，无测速数据，直接终止流程"
             exit 0
           fi
           
-          # 4. 二次过滤CSV，仅保留国家列=US的IP（双重兜底杜绝欧洲IP）
+          # 二次过滤仅保留美国IP
           awk -F ',' '$7=="US"' result.csv > us_only.csv
           mv us_only.csv result.csv
           
-          # 5. 校验是否存在有效美国IP数据
-          if [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "警告：本次测速未筛选到任何可用美国IP，跳过DNS更新，流程正常结束"
+          # 判断是否存在有效IP数据（至少1条结果）
+          LINE_NUM=$(wc -l < result.csv)
+          if [ "$LINE_NUM" -lt 2 ]; then
+            echo "警告：过滤后无可用美国IP，终止流程，不执行DNS更新"
             exit 0
           fi
           
-          # 6. 提取测速第一行最优IP
+          # 提取最优IP
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
-            echo "错误：提取最优IP为空，终止流程"
+            echo "错误：提取到的最优IP为空，终止流程"
             exit 1
           fi
           
-          # 将最优IP写入本地文件 best_ip.txt
+          # 写入本地IP文件保存
           echo "$BEST_IP" > best_ip.txt
           echo "已将最优北美IP写入 best_ip.txt"
           
+          # 导出环境变量
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "======================================"
           echo "🎉 筛选出大陆访问最优美国IP: $BEST_IP"
           echo "======================================"
 
+      # 上传日志，失败/成功都上传
       - name: Upload all log files (result.csv + best_ip.txt)
         uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: cfst-us-ip-full-logs
           path: |
             result.csv
             best_ip.txt
-        # 即使文件不存在也不报错
-        if: success() || failure()
 
+      # 关键：只有成功拿到IP才执行DNS更新
       - name: Update Cloudflare DNS Record (Exact domain match)
+        if: env.CURRENT_BEST_IP != ''
         run: |
           # ================= 自定义配置区域 =================
           CF_DOMAIN="unattenedpay.kdns.fr"
@@ -84,7 +88,7 @@ jobs:
           # ==================================================
           FULL_RECORD_NAME="${CF_SUBDOMAIN}.${CF_DOMAIN}"
 
-          # 读取密钥并清理空格
+          # 读取密钥清理空格
           CF_API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           CF_ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
 
@@ -93,7 +97,7 @@ jobs:
             exit 1
           fi
 
-          # 获取Zone下所有A记录
+          # 获取Zone所有A记录
           RESPONSE_RAW=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
@@ -104,7 +108,7 @@ jobs:
             exit 1
           fi
           
-          # 精准完全匹配域名，不再模糊contains，防止误匹配其他子域名
+          # 精准完整匹配域名
           RECORD_ID=$(echo "$RESPONSE_RAW" | jq -r --arg dom "$FULL_RECORD_NAME" '.result[]? | select(.name == $dom) | .id')
           CURRENT_DNS_IP=$(echo "$RESPONSE_RAW" | jq -r --arg dom "$FULL_RECORD_NAME" '.result[]? | select(.name == $dom) | .content')
           
@@ -116,7 +120,7 @@ jobs:
           echo "当前DNS绑定IP: $CURRENT_DNS_IP"
           echo "测速最优US IP: $CURRENT_BEST_IP"
 
-          # IP无变化则跳过更新，节约API请求
+          # IP无变化直接跳过更新
           if [ "$CURRENT_DNS_IP" = "$CURRENT_BEST_IP" ]; then
             echo "✅ IP无变更，无需更新DNS，流程结束"
             exit 0
@@ -124,7 +128,7 @@ jobs:
 
           echo "🎯 待更新记录ID: $RECORD_ID"
 
-          # 调用API更新A记录，关闭代理直连
+          # 更新DNS A记录
           RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
