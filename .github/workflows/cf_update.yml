@@ -15,7 +15,11 @@ jobs:
           fetch-depth: 0
 
       - name: Download and Run CloudflareSpeedTest (Only US IP)
+        id: speedtest_step
         run: |
+          # 初始化空文件，防止后续git找不到文件
+          touch result.csv best_ip.txt
+          
           wget --timeout=10 --tries=3 -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
           chmod +x cfst
@@ -32,8 +36,10 @@ jobs:
           
           ./cfst -f na_us_ips.txt -loc US -url https://cf.xiu2.xyz/url -n 20 -p 1 -o result.csv || true
           
-          if [ ! -f result.csv ]; then
-            echo "警告：未生成测速结果文件，无可用IP，流程结束"
+          if [ ! -s result.csv ]; then
+            echo "警告：测速文件为空，无可用美国IP"
+            echo "NO_US_IP_AVAILABLE" > best_ip.txt
+            echo "HAS_VALID_IP=false" >> $GITHUB_ENV
             exit 0
           fi
           
@@ -42,23 +48,27 @@ jobs:
           
           LINE_NUM=$(wc -l < result.csv)
           if [ "$LINE_NUM" -lt 2 ]; then
-            echo "警告：过滤后无美国IP，终止流程不更新DNS"
+            echo "警告：过滤后无美国IP"
+            echo "NO_US_IP_AVAILABLE" > best_ip.txt
+            echo "HAS_VALID_IP=false" >> $GITHUB_ENV
             exit 0
           fi
           
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
-            echo "错误：提取IP为空，终止任务"
+            echo "错误：提取IP为空"
+            echo "NO_US_IP_AVAILABLE" > best_ip.txt
+            echo "HAS_VALID_IP=false" >> $GITHUB_ENV
             exit 1
           fi
           
           echo "$BEST_IP" > best_ip.txt
           echo "CURRENT_BEST_IP=$BEST_IP" >> $GITHUB_ENV
+          echo "HAS_VALID_IP=true" >> $GITHUB_ENV
           echo "======================================"
           echo "🎉 最优美国IP: $BEST_IP"
           echo "======================================"
 
-      # 1. 上传日志到Artifacts（临时下载查看）
       - name: Upload Log Artifacts
         uses: actions/upload-artifact@v4
         if: success() || failure()
@@ -68,19 +78,22 @@ jobs:
             result.csv
             best_ip.txt
 
-      # 2. 提交 best_ip.txt + result.csv 写入仓库永久保存
-      - name: Commit IP files to repo
-        if: env.CURRENT_BEST_IP != ''
+      # 无论是否有有效IP，都提交文件到仓库
+      - name: Commit CSV & best_ip.txt to repo
         run: |
           git config --global user.name "Actions Bot"
           git config --global user.email "actions@github.com"
-          git add best_ip.txt result.csv
-          git commit -m "Auto save speed test data, best ip: ${{ env.CURRENT_BEST_IP }}"
-          git push origin HEAD
+          git add result.csv best_ip.txt
+          # 有变更才提交，无变更跳过push
+          if git diff --staged --quiet; then
+            echo "文件无变化，无需提交"
+          else
+            git commit -m "Auto update speed log files | Valid IP: ${{ env.HAS_VALID_IP }}"
+            git push origin HEAD
+          fi
 
-      # 3. 更新Cloudflare DNS（仅存在有效IP才执行）
       - name: Update Cloudflare DNS Record
-        if: env.CURRENT_BEST_IP != ''
+        if: env.HAS_VALID_IP == 'true'
         run: |
           CF_DOMAIN="unattenedpay.kdns.fr"
           CF_SUBDOMAIN="sales"
