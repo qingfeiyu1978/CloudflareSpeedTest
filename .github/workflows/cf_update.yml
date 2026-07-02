@@ -13,11 +13,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true # 关键：保留推送凭证
 
       - name: Download and Run CloudflareSpeedTest (Only US IP)
         id: speedtest_step
         run: |
-          # 初始化空文件，防止后续git找不到文件
           touch result.csv best_ip.txt
           
           wget --timeout=10 --tries=3 -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
@@ -78,15 +78,17 @@ jobs:
             result.csv
             best_ip.txt
 
-      # 无论是否有有效IP，都提交文件到仓库
+      # 修复后的提交步骤：自动合并冲突、权限兼容
       - name: Commit CSV & best_ip.txt to repo
         run: |
           git config --global user.name "Actions Bot"
           git config --global user.email "actions@github.com"
+          # 拉取线上最新代码解决冲突
+          git pull origin HEAD --rebase
           git add result.csv best_ip.txt
-          # 有变更才提交，无变更跳过push
+          # 判断是否有文件变更
           if git diff --staged --quiet; then
-            echo "文件无变化，无需提交"
+            echo "文件无变更，跳过提交推送"
           else
             git commit -m "Auto update speed log files | Valid IP: ${{ env.HAS_VALID_IP }}"
             git push origin HEAD
