@@ -34,12 +34,18 @@ jobs:
           # 3. 测速核心：-loc US 强制只保留美国节点
           ./cfst -f na_us_ips.txt -loc US -url https://cf.xiu2.xyz/url -n 50 -p 1 -o result.csv || true
           
+          # ========== 修复：先判断文件是否存在，不存在直接跳过 ==========
+          if [ ! -f result.csv ]; then
+            echo "警告：cfst 未生成 result.csv，无测速数据，流程结束"
+            exit 0
+          fi
+          
           # 4. 二次过滤CSV，仅保留国家列=US的IP（双重兜底杜绝欧洲IP）
           awk -F ',' '$7=="US"' result.csv > us_only.csv
           mv us_only.csv result.csv
           
           # 5. 校验是否存在有效美国IP数据
-          if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
+          if [ $(wc -l < result.csv) -lt 2 ]; then
             echo "警告：本次测速未筛选到任何可用美国IP，跳过DNS更新，流程正常结束"
             exit 0
           fi
@@ -51,7 +57,7 @@ jobs:
             exit 1
           fi
           
-          # ===== 新增：将最优IP写入本地文件 best_ip.txt =====
+          # 将最优IP写入本地文件 best_ip.txt
           echo "$BEST_IP" > best_ip.txt
           echo "已将最优北美IP写入 best_ip.txt"
           
@@ -67,6 +73,8 @@ jobs:
           path: |
             result.csv
             best_ip.txt
+        # 即使文件不存在也不报错
+        if: success() || failure()
 
       - name: Update Cloudflare DNS Record (Exact domain match)
         run: |
