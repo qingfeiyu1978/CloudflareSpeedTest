@@ -2,9 +2,9 @@ name: Cloudflare Auto Update DNS
 
 on:
   schedule:
-    # 每两小时自动运行一次 (UTC 时间 0 点、2 点...)
+    # 每两小时自动运行一次 (UTC 时间)
     - cron: '0 */2 * * *'
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch: # 允许在 GitHub 上手动点击按钮运行
 
 jobs:
   update_dns:
@@ -15,9 +15,12 @@ jobs:
 
       - name: Download and Run CloudflareSpeedTest
         run: |
-          # 1. 下载 CloudflareSpeedTest
+          # 1. 下载 CloudflareSpeedTest 官方 v2.3.5 版本
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
+          
+          # 【修复核心问题】：官方解压后文件名叫 CloudflareST，这里统一重命名为 cfst
+          mv CloudflareST cfst 2>/dev/null || true
           chmod +x cfst
           
           # 2. 限定美西/纯美 IP 网段
@@ -29,13 +32,12 @@ jobs:
           104.20.0.0/20
           EOF
           
-          # 3. 运行测速：使用 -tp 443 测量延迟，并提高测量精度
-          # 注意：GitHub 节点测速可能与国内有偏差，建议限制延迟下限并按延迟排序
+          # 3. 运行测速
           ./cfst -f pure_us_ips.txt -tp 443 -n 100 -p 10 -o result.csv || true
           
-          # 4. 严格校验结果文件
+          # 4. 校验测速结果文件
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
-            echo "❌ 错误：cfst 测速未能生成任何有效结果！"
+            echo "❌ 错误：cfst 测速未能生成任何有效的优选 IP 结果！"
             exit 1
           fi
           
@@ -67,12 +69,12 @@ jobs:
             exit 1
           fi
 
-          # 1. 查询目标域名的所有 A 记录
+          # 1. 查询目标 Zone 下的所有 A 记录
           RESPONSE_RAW=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          # 2. 检查鉴权状态
+          # 2. 检查 Cloudflare 鉴权状态
           IS_SUCCESS=$(echo "$RESPONSE_RAW" | jq -r '.success? // false')
           if [ "$IS_SUCCESS" != "true" ]; then
             echo "❌ Cloudflare API 鉴权失败，请检查 Token 及 Zone ID 权限设置。"
@@ -80,29 +82,29 @@ jobs:
             exit 1
           fi
           
-          # 3. 精准匹配完整的域名 (防止误匹配 sales-test 等类似子域名)
+          # 3. 精准匹配完整的子域名 (防止包含子串导致的错配)
           RECORD_ID=$(echo "$RESPONSE_RAW" | jq -r --arg name "$FULL_RECORD_NAME" '.result[]? | select(.name == $name) | .id' | head -n 1)
           
           if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
             echo "❌ 错误：在 Cloudflare 中未找到名称为 $FULL_RECORD_NAME 的 A 记录！"
-            echo "💡 请先去 Cloudflare 手动新建一条名为 $CF_SUBDOMAIN 的 A 记录（IP 任意）。"
+            echo "💡 请确保已在 Cloudflare 中手动创建好名为 $CF_SUBDOMAIN 的 A 记录。"
             exit 1
           fi
 
           echo "🎯 锁定目标 DNS 记录 ID: $RECORD_ID ($FULL_RECORD_NAME)"
 
-          # 4. 更新 DNS 记录指向 (强制设为 DNS Only 模式)
+          # 4. 更新 DNS 记录指向 (设为 DNS Only / 灰色小云彩)
           RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
             --data "{\"type\":\"A\",\"name\":\"$FULL_RECORD_NAME\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
           
-          # 5. 输出更新结果
+          # 5. 判断是否修改成功
           SUCCESS=$(echo "$RESPONSE" | jq -r '.success? // false')
           if [ "$SUCCESS" = "true" ]; then
             echo "🚀 [SUCCESS] 成功更新 $FULL_RECORD_NAME 指向 IP: $CURRENT_BEST_IP"
           else
-            echo "💥 [ERROR] Cloudflare 拒绝了修改请求，返回详细错误："
+            echo "💥 [ERROR] Cloudflare 拒绝了修改请求，详细错误信息："
             echo "$RESPONSE" | jq -r '.errors'
             exit 1
           fi
