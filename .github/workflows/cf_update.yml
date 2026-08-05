@@ -18,7 +18,7 @@ jobs:
           # 1. 下载官方最新 2.3.5 版本 Linux amd64 固件
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
-          chmod +x cfst_linux_amd64
+          chmod +x cfst
           
           # 2. 精准限定【100% 锁定纯正美国、不乱飘、且国内访问延迟最优】的 Cloudflare 官方特属美西 IP 段
           # 这些网段在全球路由中被高度固化在美国本土机房
