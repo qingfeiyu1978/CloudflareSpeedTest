@@ -1,9 +1,24 @@
-- name: Download and Run CloudflareSpeedTest
+name: Cloudflare Auto Update DNS
+
+on:
+  schedule:
+    # 每两小时自动运行一次 (UTC 时间)
+    - cron: '0 */2 * * *'
+  workflow_dispatch: # 支持手动点击触发
+
+jobs:
+  update_dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download and Run CloudflareSpeedTest
         run: |
           # 1. 下载压缩包
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           
-          # 2. 解压并列出当前目录结构
+          # 2. 解压并列出目录内容
           tar -zxvf cfst_linux_amd64.tar.gz
           echo "=== 解压后的目录内容 ==="
           ls -la
@@ -14,10 +29,10 @@
           elif [ -f "cfst_linux_amd64" ]; then
             mv cfst_linux_amd64 cfst
           fi
-          
-          # 如果依然找不到 cfst，自动查找当前目录下最大的可执行文件作为 cfst
+
+          # 如果依然找不到 cfst，自动查找当前目录下第一个二进制文件
           if [ ! -f "cfst" ]; then
-            EXEC_FILE=$(find . -maxdepth 1 -type f -not -name "*.tar.gz" -not -name "*.txt" -not -name "*.sh" | head -n 1)
+            EXEC_FILE=$(find . -maxdepth 1 -type f -not -name "*.tar.gz" -not -name "*.txt" -not -name "*.sh" -not -name ".*" | head -n 1)
             if [ -n "$EXEC_FILE" ]; then
               mv "$EXEC_FILE" cfst
             fi
@@ -55,3 +70,59 @@
           echo "======================================"
           echo "🎉 成功筛选出优选 IP: $BEST_IP"
           echo "======================================"
+
+      - name: Update Cloudflare DNS Record
+        run: |
+          # ================= 配置区域 =================
+          CF_DOMAIN="unattenedpay.kdns.fr"      # 主域名
+          CF_SUBDOMAIN="sales"                  # 子域名前缀
+          FULL_RECORD_NAME="${CF_SUBDOMAIN}.${CF_DOMAIN}"
+          # ============================================
+
+          CF_API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
+          CF_ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
+
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
+            echo "❌ 错误：GitHub Secrets 中的 CF_API_TOKEN 或 CF_ZONE_ID 未配置！"
+            exit 1
+          fi
+
+          # 1. 查询目标 Zone 下的所有 A 记录
+          RESPONSE_RAW=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json")
+          
+          # 2. 检查 Cloudflare 鉴权状态
+          IS_SUCCESS=$(echo "$RESPONSE_RAW" | jq -r '.success? // false')
+          if [ "$IS_SUCCESS" != "true" ]; then
+            echo "❌ Cloudflare API 鉴权失败，请检查 Token 及 Zone ID 权限设置。"
+            echo "$RESPONSE_RAW" | jq -r '.errors'
+            exit 1
+          fi
+          
+          # 3. 精准匹配完整的子域名
+          RECORD_ID=$(echo "$RESPONSE_RAW" | jq -r --arg name "$FULL_RECORD_NAME" '.result[]? | select(.name == $name) | .id' | head -n 1)
+          
+          if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
+            echo "❌ 错误：在 Cloudflare 中未找到名称为 $FULL_RECORD_NAME 的 A 记录！"
+            echo "💡 请确保已在 Cloudflare 中手动创建好名为 $CF_SUBDOMAIN 的 A 记录。"
+            exit 1
+          fi
+
+          echo "🎯 锁定目标 DNS 记录 ID: $RECORD_ID ($FULL_RECORD_NAME)"
+
+          # 4. 更新 DNS 记录指向 (设为 DNS Only / 灰色小云彩)
+          RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"A\",\"name\":\"$FULL_RECORD_NAME\",\"content\":\"$CURRENT_BEST_IP\",\"ttl\":60,\"proxied\":false}")
+          
+          # 5. 判断是否修改成功
+          SUCCESS=$(echo "$RESPONSE" | jq -r '.success? // false')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "🚀 [SUCCESS] 成功更新 $FULL_RECORD_NAME 指向 IP: $CURRENT_BEST_IP"
+          else
+            echo "💥 [ERROR] Cloudflare 拒绝了修改请求，详细错误信息："
+            echo "$RESPONSE" | jq -r '.errors'
+            exit 1
+          fi
