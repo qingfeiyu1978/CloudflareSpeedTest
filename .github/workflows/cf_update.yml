@@ -4,9 +4,11 @@
           wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
           
-          # 2. 赋予所有解压出来的文件执行权限，并统一别名为 cfst
-          chmod +x CloudflareST* cfst* 2>/dev/null || true
-          [ -f CloudflareST ] && mv CloudflareST cfst
+          # 2. 安全重命名与赋权
+          if [ -f "CloudflareST" ]; then
+            mv CloudflareST cfst
+          fi
+          chmod +x cfst
           
           # 3. 生成美西 IP 网段
           cat <<EOF > pure_us_ips.txt
@@ -17,8 +19,8 @@
           104.20.0.0/20
           EOF
           
-          # 4. 运行测速
-          ./cfst -f pure_us_ips.txt -tp 443 -n 100 -p 10 -o result.csv || true
+          # 4. 运行测速 (限制测速目标数 -n 50，提高 GitHub Actions 执行效率)
+          ./cfst -f pure_us_ips.txt -tp 443 -n 50 -p 5 -o result.csv || true
           
           # 5. 校验结果
           if [ ! -f result.csv ] || [ $(wc -l < result.csv) -lt 2 ]; then
@@ -26,7 +28,7 @@
             exit 1
           fi
           
-          # 6. 提取 IP
+          # 6. 提取 IP (过滤首行表头，取第 2 行第 1 列)
           BEST_IP=$(sed -n '2p' result.csv | cut -d',' -f1 | tr -d '[:space:]')
           if [ -z "$BEST_IP" ]; then
             echo "❌ 错误：提取到的 BEST_IP 为空！"
